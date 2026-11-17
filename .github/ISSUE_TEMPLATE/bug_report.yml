@@ -1,0 +1,51 @@
+name: バグ報告
+description: モジュールが期待どおりに動かない場合はこちら
+labels: [bug]
+body:
+  - type: input
+    id: module
+    attributes:
+      label: 対象モジュール
+      description: モジュールのパス。複数ある場合はカンマ区切りで。
+      placeholder: modules/google/cloud-run-service
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 参照しているバージョン
+      description: "`?ref=` に指定しているタグ、またはコピー元のタグ"
+      placeholder: v1.2.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 何が起きたか
+      description: エラーメッセージや plan の差分をそのまま貼ってください（機密情報はマスクすること）。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待した挙動
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 再現手順
+      description: モジュールに渡した変数（機密情報はマスクすること）と実行したコマンド。
+      render: hcl
+    validations:
+      required: true
+
+  - type: input
+    id: terraform-version
+    attributes:
+      label: Terraform / プロバイダーのバージョン
+      placeholder: "terraform 1.13.1 / hashicorp/google 7.45.0"

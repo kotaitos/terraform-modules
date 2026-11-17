@@ -1,0 +1,13 @@
+# ------------------------------------------------------------------------------
+# コードオーナー
+#
+# ここに書いたユーザーには、該当ファイルを含む PR で自動的にレビュー依頼が飛びます。
+# ラベルとアサイン（作成者自身）は .github/workflows/triage.yml が自動で付けます。
+#
+# 後の行が先の行より優先されます。担当を分けたくなったら、より具体的なパスを
+# 下に追加してください（例: /modules/google/postgres-psc/ @someone）。
+#
+# 書式: https://docs.github.com/ja/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# ------------------------------------------------------------------------------
+
+* @kotarosaitobp

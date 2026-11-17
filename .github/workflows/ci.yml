@@ -1,0 +1,185 @@
+name: CI
+
+# モジュールの変更だけでなく、README やドキュメントの変更でも実行する。
+# README と実装の整合性チェック (make policy) があるため、ドキュメントだけの変更でも壊れうる。
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    # release/* も対象にする。リリース PR は GITHUB_TOKEN で作られるため pull_request の
+    # ワークフローが起動せず、push の実行だけがリリース対象コミットのチェックになる。
+    branches: [main, develop, 'release/**']
+  workflow_dispatch:
+
+# 同じ PR で連続 push された場合は古い実行をキャンセルする
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # ツールのバージョンは .tool-versions を唯一の情報源にする
+  # ----------------------------------------------------------------------------
+  versions:
+    name: バージョン解決
+    runs-on: ubuntu-latest
+    outputs:
+      terraform_min: ${{ steps.read.outputs.terraform_min }}
+      trivy: ${{ steps.read.outputs.trivy }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # tflint は setup-tflint が .tool-versions を直接読むのでここには出さない。
+      - id: read
+        run: |
+          {
+            echo "terraform_min=$(awk '$1=="terraform"{print $2}' .tool-versions)"
+            echo "trivy=$(awk '$1=="trivy"{print $2}' .tool-versions)"
+          } >> "$GITHUB_OUTPUT"
+
+  # ----------------------------------------------------------------------------
+  # 検証対象のモジュールを決める
+  # PR では変更のあったモジュールだけを検証する（モジュールが増えても CI 時間が
+  # 線形に伸びないようにするため）。Makefile や scripts など全体に影響する変更、
+  # および main / develop への push では全モジュールを検証する。
+  # ----------------------------------------------------------------------------
+  changes:
+    name: 対象モジュールの決定
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.detect.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            modules="$(scripts/changed-modules.sh "origin/${BASE_REF}" HEAD | tr '\n' ' ')"
+          else
+            modules="$(scripts/changed-modules.sh | tr '\n' ' ')"
+          fi
+          echo "modules=${modules}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### 検証対象のモジュール"
+            echo
+            if [ -z "${modules}" ]; then
+              echo "なし（モジュールの変更を含まない変更）"
+            else
+              for module in ${modules}; do echo "- \`${module}\`"; done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # フォーマットとリポジトリ規約（README と実装の整合など）
+  # 規約チェックは 1 秒未満で終わるので、常に全モジュールを対象にする。
+  # ----------------------------------------------------------------------------
+  conventions:
+    name: 規約チェック
+    runs-on: ubuntu-latest
+    needs: versions
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ needs.versions.outputs.terraform_min }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: make fmt
+
+      - name: リポジトリ規約
+        run: make policy
+
+      - name: 規約チェッカー自身のテスト
+        run: make test-scripts
+
+  # ----------------------------------------------------------------------------
+  # tflint
+  # ----------------------------------------------------------------------------
+  lint:
+    name: tflint
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.modules != ''
+    steps:
+      - uses: actions/checkout@v7
+
+      # バージョンは .tool-versions をそのまま読ませる。
+      # プラグイン (.tflint.hcl の google ルールセット) のキャッシュもこの action が持つ。
+      - uses: terraform-linters/setup-tflint@v6.3.0
+        with:
+          tflint_version_file: .tool-versions
+          cache: true
+          plugin_dir: .tools/tflint-plugins
+
+      - name: tflint
+        env:
+          # tflint のプラグイン取得が GitHub API のレート制限にかからないようにする
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make MODULES="${{ needs.changes.outputs.modules }}" lint
+
+  # ----------------------------------------------------------------------------
+  # terraform validate / test
+  # 最小サポートバージョン (.tool-versions) と最新版の両方で実行する。
+  # 利用者の Terraform バージョンは幅があるため、どちらでも動くことを保証する。
+  # ----------------------------------------------------------------------------
+  terraform:
+    name: validate & test (terraform ${{ matrix.terraform }})
+    runs-on: ubuntu-latest
+    needs: [versions, changes]
+    if: needs.changes.outputs.modules != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        terraform:
+          - ${{ needs.versions.outputs.terraform_min }}
+          - latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+
+      # モジュール間でプロバイダーのダウンロードを共有する（Makefile と同じパス）
+      - name: プロバイダーのキャッシュ
+        uses: actions/cache@v6
+        with:
+          path: .terraform-plugin-cache
+          key: ${{ runner.os }}-tf-providers-${{ hashFiles('modules/**/versions.tf') }}
+          restore-keys: |
+            ${{ runner.os }}-tf-providers-
+
+      - name: terraform validate
+        run: make MODULES="${{ needs.changes.outputs.modules }}" validate
+
+      - name: terraform test
+        run: make MODULES="${{ needs.changes.outputs.modules }}" test
+
+  # ----------------------------------------------------------------------------
+  # trivy（misconfiguration スキャン）
+  # ----------------------------------------------------------------------------
+  security:
+    name: セキュリティスキャン
+    runs-on: ubuntu-latest
+    needs: versions
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: v${{ needs.versions.outputs.trivy }}
+          cache: true
+
+      - name: trivy
+        run: make security

@@ -1,0 +1,38 @@
+# ------------------------------------------------------------------------------
+# コミット前・コミットメッセージのチェック。
+#
+#   make hooks   # 有効にする（最初に一度）
+#   git commit --no-verify   # 一時的に飛ばす
+#
+# 重い検査（terraform validate / test / tflint / trivy）はここでは走らせない。
+# push 前に make preflight を実行すること（CI でも同じチェックが走る）。
+# ------------------------------------------------------------------------------
+minimum_pre_commit_version: '4.0.0'
+
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  # terraform fmt。差分があれば自動で整形する（make fmt-fix と同じ）。
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.108.1
+    hooks:
+      - id: terraform_fmt
+
+  # コミットメッセージが <type>(<scope>): <subject> 形式かを確認する。
+  # 規約は docs/commit_message.md、判定ルールは .commitlintrc.json にある。
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: v9.26.0
+    hooks:
+      - id: commitlint
+        stages: [commit-msg]
+        additional_dependencies: ['@commitlint/config-conventional']
+
+  # このリポジトリ固有の規約（README と実装の整合など）。OSS に相当するものがないので自作。
+  - repo: local
+    hooks:
+      - id: policy
+        name: リポジトリ規約 (scripts/lint-modules.py)
+        entry: python3 scripts/lint-modules.py
+        language: system
+        files: \.(tf|tftest\.hcl)$|README\.md$
+        pass_filenames: false

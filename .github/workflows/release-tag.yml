@@ -1,0 +1,179 @@
+name: Release Tag
+
+# main に変更が入ったら、バージョンタグを打ってリリースを起動する。
+#
+#   リリース PR（release-pr.yml が release/vX.Y.Z から作る「Release vX.Y.Z」）のマージ
+#     → PR タイトルのバージョンでタグを打つ
+#   hotfix など main への直接の変更
+#     → コミットメッセージからバージョンを算出してタグを打ち、develop への追従 PR を作る
+#
+# タグを打ったあとの検証と GitHub Release の作成は release.yml が行う。
+#
+# workflow_dispatch は、月次の自動リリース（release-pr.yml がリリース PR をマージする）から
+# 起動するためにある。GITHUB_TOKEN によるマージでは push イベントのワークフローが起動しない。
+# 「main にマージ済みなのにタグが無い」状態になったときも、これを手で実行すれば回復する
+# （既存のタグは打ち直さないので、何度実行しても安全）。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag
+
+jobs:
+  tag:
+    name: タグ付けとリリースの起動
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # タグの作成
+      actions: write        # release.yml の起動
+      pull-requests: write  # PR へのコメントと develop への追従 PR
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # タグと全コミットからバージョンを算出するため、浅いクローンにはしない
+          fetch-depth: 0
+
+      - name: マージされた PR とバージョンを調べる
+        id: version
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" > pulls.json
+          # 1 つのコミットに複数の PR が紐づくことがある（main を head とする追従 PR が open の間など）。
+          # 並び順は保証されないので、このコミットをマージコミットに持つ PR を優先して選ぶ。
+          pr="$(jq -c --arg sha "${GITHUB_SHA}" '[.[] | select(.merge_commit_sha == $sha)][0] // .[0] // {}' pulls.json)"
+          number="$(jq -r '.number // ""' <<<"${pr}")"
+          title="$(jq -r '.title // ""' <<<"${pr}")"
+          head_ref="$(jq -r '.head.ref // ""' <<<"${pr}")"
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+          echo "head_ref=${head_ref}" >> "$GITHUB_OUTPUT"
+
+          version=""
+          # タイトルのバージョンを使うのは、リリースブランチ（release/vX.Y.Z）から出た
+          # リリース PR で、ブランチ名とタイトルのバージョンが一致するときだけ。
+          # 他のブランチから "Release v9.9.9" というタイトルで PR を出しても効かないようにする。
+          # （develop 起点は初回リリースの経過措置。release-pr.yml が main に入る前に作られた PR）
+          if [[ "${title}" =~ ^Release[[:space:]]+(v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+            && { [ "${head_ref}" = "release/${BASH_REMATCH[1]}" ] || [ "${head_ref}" = "develop" ]; }; then
+            # リリース PR: レビュー済みのバージョンをそのまま使う
+            version="${BASH_REMATCH[1]}"
+            origin="リリース PR のタイトル"
+          elif result="$(python3 scripts/next-version.py --json)"; then
+            # hotfix など: main に入った変更からバージョンを算出する
+            version="$(jq -r .next <<<"${result}")"
+            origin="コミットメッセージからの算出"
+          fi
+
+          if [ -z "${version}" ]; then
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            echo "note=前回のリリース以降に main への変更がありません。タグは打ちません。" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+            echo "note=タグ ${version} は既に存在します。公開済みのタグは打ち直しません。" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "note=${version} を ${origin} から決定しました。" >> "$GITHUB_OUTPUT"
+
+      - name: タグを作成してリリースを起動
+        if: steps.version.outputs.tagged == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "${VERSION}" -m "Release ${VERSION}"
+          git push origin "refs/tags/${VERSION}"
+
+          # GITHUB_TOKEN で push したタグでは push イベントのワークフローが起動しない
+          # （workflow_dispatch と repository_dispatch だけが例外）。そのため release.yml を
+          # タグの ref に対して明示的に起動する。
+          for attempt in 1 2 3; do
+            if gh workflow run release.yml --ref "${VERSION}"; then
+              exit 0
+            fi
+            echo "release.yml の起動に失敗しました。再試行します (${attempt}/3)"
+            sleep 5
+          done
+          echo "::error::release.yml を起動できませんでした。Actions から手動で実行してください（ref: ${VERSION}）。"
+          exit 1
+
+      - name: マージ元の PR に結果をコメント
+        if: steps.version.outputs.tagged == 'true' && steps.version.outputs.number != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: |
+          cat > comment.md <<MSG
+          🏷 \`${VERSION}\` のタグを作成しました。検証と GitHub Release の作成が
+          [Release ワークフロー](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/release.yml) で進みます。
+
+          チェックが失敗した場合、Release は作成されません（タグは残ります）。
+          修正を main に入れて、次のパッチバージョンをリリースしてください。
+          MSG
+          gh pr comment "${NUMBER}" --body-file comment.md
+
+      # hotfix のように develop 以外から main が変わった場合、develop がその変更を
+      # 取り込めていない。手作業のバックマージを忘れないよう PR にしておく。
+      - name: develop への追従 PR
+        if: ${{ !cancelled() }}
+        env:
+          HEAD_REF: ${{ steps.version.outputs.head_ref }}
+        run: |
+          git fetch --no-tags origin '+refs/heads/develop:refs/remotes/origin/develop'
+
+          # develop に入っていない「実質的な変更」の数で判定する。
+          #   通常のリリース（release/vX.Y.Z -> main の merge commit）: 0（追従は不要）
+          #   リリースブランチに修正を入れてからマージ                : 1 以上（その修正を develop に戻す）
+          #   hotfix を main に直接マージ                            : 1 以上
+          #   リリース PR を Squash / Rebase でマージ                : 1 以上（履歴が分岐している）
+          missing="$(git rev-list --count --no-merges refs/remotes/origin/develop..HEAD)"
+          if [ "${missing}" -eq 0 ]; then
+            echo "develop は main の変更を含んでいます。追従 PR は不要です。"
+            exit 0
+          fi
+
+          case "${HEAD_REF}" in
+            develop | release/*)
+              echo "::warning::リリース PR のマージ後に main へ develop 未反映の変更があります（Squash マージ、またはリリースブランチへの修正）。作成する追従 PR をマージして develop に戻してください。"
+              ;;
+          esac
+
+          existing="$(gh pr list --base develop --head main --state open --json number --jq '.[0].number // ""')"
+          if [ -n "${existing}" ]; then
+            echo "既に追従 PR #${existing} があります。"
+            exit 0
+          fi
+
+          cat > backmerge.md <<'MSG'
+          main に入った変更（hotfix など）を develop に取り込みます。
+          **マージコミットで**（Squash を使わずに）マージしてください。
+
+          この PR は release-tag.yml が自動で作成しました。
+          MSG
+          url="$(gh pr create --base develop --head main \
+            --title 'chore(ci): main の変更を develop に取り込む' \
+            --body-file backmerge.md)"
+          echo "追従 PR を作成しました: ${url}"
+          gh pr edit "${url}" --add-label ignore-for-release || true
+          case "${GITHUB_ACTOR}" in
+            *'[bot]') ;;
+            *) gh pr edit "${url}" --add-assignee "${GITHUB_ACTOR}" || true ;;
+          esac
+
+      - name: サマリー
+        if: always()
+        run: |
+          echo "### タグ付け: ${{ steps.version.outputs.tagged == 'true' && '✅ 実施' || '⏭️ スキップ' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.version.outputs.note }}" >> "$GITHUB_STEP_SUMMARY"

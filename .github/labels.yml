@@ -1,0 +1,64 @@
+# ラベルの定義（labels as code）。
+#
+# .github/workflows/labels.yml が crazy-max/ghaction-github-labeler で同期する。
+# リリースノートのカテゴリ分け (.github/release.yml)、Dependabot、Triage ワークフローは
+# いずれもラベル名を前提にしているので、ここが唯一の情報源。
+#
+# 既存ラベルの削除はしない（PR や Issue から外れてしまうため）。ここから行を消しても
+# ラベルは残る。消したいときは GitHub の UI で削除する。
+
+- name: "breaking-change"
+  color: "b60205"
+  description: "利用者の対応が必要な破壊的変更（MAJOR リリースになる）"
+
+- name: "new-module"
+  color: "0e8a16"
+  description: "新しいモジュールの追加"
+
+- name: "enhancement"
+  color: "a2eeef"
+  description: "機能追加・改善"
+
+- name: "bug"
+  color: "d73a4a"
+  description: "バグの報告・修正"
+
+- name: "documentation"
+  color: "0075ca"
+  description: "ドキュメントのみの変更"
+
+- name: "ci"
+  color: "ededed"
+  description: "CI・Makefile・scripts などの開発基盤"
+
+- name: "dependencies"
+  color: "0366d6"
+  description: "依存の更新（Dependabot が付与する）"
+
+- name: "template"
+  color: "c2e0c6"
+  description: "モジュールの雛形（templates/）の変更"
+
+- name: "devcontainer"
+  color: "c5def5"
+  description: "開発コンテナ（.devcontainer/）の変更"
+
+- name: "maintenance"
+  color: "d4c5f9"
+  description: "定期メンテナンス（週次チェックが自動で付与する）"
+
+- name: "release"
+  color: "5319e7"
+  description: "リリース PR（自動で作成・更新される）"
+
+- name: "release-hold"
+  color: "e99695"
+  description: "月次の自動リリースを一時的に止める"
+
+- name: "ignore-for-release"
+  color: "cfd3d7"
+  description: "リリースノートに載せない"
+
+- name: "needs-triage"
+  color: "fbca04"
+  description: "内容の確認・分類が必要"

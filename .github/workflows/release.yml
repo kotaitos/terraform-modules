@@ -1,0 +1,231 @@
+name: Release
+
+# バージョンタグに対して、検証してから GitHub Release を作成する。
+# 利用者は `?ref=<タグ>` でモジュールを参照するため、リリースは全チェックを通ったタグにだけ
+# 作成する（チェックが落ちた場合、タグは残るが Release は作られず、失敗が通知される）。
+#
+# 通常は release-tag.yml（main へのマージでタグを打つ）から workflow_dispatch で起動される。
+# GITHUB_TOKEN で push されたタグでは push イベントのワークフローが起動しないため、
+# 自動フローでは dispatch を使う。タグを手で push した場合は push トリガーで動く。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # 検証: CI と同じチェックを最小サポートバージョンで実行する。
+  # 外部から取得したツール（tflint / trivy / プロバイダー）を実行するジョブなので、
+  # 書き込み権限を持たせない。
+  # ----------------------------------------------------------------------------
+  verify:
+    name: タグの検証
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: タグの形式を確認
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::タグ ${tag} はセマンティックバージョニングの形式ではありません (例: v1.2.0)。"
+            exit 1
+          fi
+
+      - name: タグが main に含まれていることを確認
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+            echo "::error::このタグは main ブランチに含まれていません。リリースは main にマージされたコミットに対して作成してください。"
+            exit 1
+          fi
+
+      - name: ツールバージョンの読み込み
+        id: versions
+        run: |
+          {
+            echo "terraform_min=$(awk '$1=="terraform"{print $2}' .tool-versions)"
+            echo "trivy=$(awk '$1=="trivy"{print $2}' .tool-versions)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ steps.versions.outputs.terraform_min }}
+          terraform_wrapper: false
+
+      # make check は tflint と trivy も使う
+      - uses: terraform-linters/setup-tflint@v6.3.0
+        with:
+          tflint_version_file: .tool-versions
+          cache: true
+          plugin_dir: .tools/tflint-plugins
+
+      - uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          version: v${{ steps.versions.outputs.trivy }}
+          cache: true
+
+      # リリース対象のコミットに対して、CI と同じチェックを最小サポートバージョンで実行する
+      - name: 全チェック
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make check
+
+  # ----------------------------------------------------------------------------
+  # 公開: リリースノートを作って GitHub Release を作成する。
+  # 書き込み権限が必要なのはこのジョブだけで、リポジトリのコードは実行しない。
+  # ----------------------------------------------------------------------------
+  publish:
+    name: GitHub Release の作成
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      # releases/generate-notes と gh release create に必要
+      contents: write
+      # リリース PR の本文（移行手順の追記）を読むために必要
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # チェックアウトしないので、gh にリポジトリを明示する
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: リリースノートの作成
+        run: |
+          tag="${GITHUB_REF_NAME}"
+
+          # PR のタイトルとラベルからノートを生成する（.github/release.yml のカテゴリ設定に従う）
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${tag}" --jq .body > generated-notes.md
+
+          # リリース PR の本文に追記された内容（破壊的変更の移行手順など）をノートの先頭に転記する。
+          # マーカーは release-pr.yml が PR 本文に埋め込んでいる。
+          # 1 コミットに複数の PR が紐づくことがあるため、マージコミットが一致する PR を優先する。
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq "[.[] | select(.merge_commit_sha == \"${GITHUB_SHA}\")][0].body // .[0].body // \"\"" > pr-body.md
+          python3 - <<'PY' > extra-notes.md
+          import pathlib
+          import re
+
+          body = pathlib.Path("pr-body.md").read_text(encoding="utf-8")
+          match = re.search(
+              r"<!-- release-notes:extra:start -->(.*?)<!-- release-notes:extra:end -->", body, re.S
+          )
+          text = re.sub(r"<!--.*?-->", "", match.group(1), flags=re.S).strip() if match else ""
+          if text:
+              print("## 移行手順")
+              print()
+              print(text)
+              print()
+          PY
+
+          {
+            cat extra-notes.md
+            echo "## 利用方法"
+            echo
+            echo '```hcl'
+            echo 'module "example" {'
+            echo "  source = \"git::https://github.com/${GITHUB_REPOSITORY}.git//modules/google/<module-name>?ref=${tag}\""
+            echo '}'
+            echo '```'
+            echo
+            echo "アップグレード手順は [docs/module_usage.md](https://github.com/${GITHUB_REPOSITORY}/blob/${tag}/docs/module_usage.md) を参照してください。"
+            echo
+            cat generated-notes.md
+          } > release-notes.md
+
+      - name: GitHub Release の作成
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          args=()
+          # v1.2.0-rc.1 のようなプレリリースタグは prerelease として公開する
+          if [[ "${tag}" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --title "${tag}" --notes-file release-notes.md "${args[@]}"
+          else
+            gh release create "${tag}" --title "${tag}" --notes-file release-notes.md "${args[@]}"
+          fi
+
+      - name: サマリー
+        if: always()
+        run: |
+          echo "### Release ${GITHUB_REF_NAME}: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # 失敗の通知
+  # リリースは無人で走るため、失敗を Actions のログだけに留めない。
+  # タグ付けは済んでいるので、気付かないと「タグはあるのに Release が無い」状態が残る。
+  # ----------------------------------------------------------------------------
+  notify:
+    name: 失敗の通知
+    runs-on: ubuntu-latest
+    needs: [verify, publish]
+    if: failure()
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const failed = '${{ needs.verify.result }}' !== 'success' ? '検証（make check）' : 'Release の作成';
+
+            const body = [
+              `リリース \`${tag}\` の**${failed}**が失敗しました。`,
+              '',
+              `詳細: [実行ログ](${runUrl})`,
+              '',
+              '- タグ `' + tag + '` は作成済みですが、GitHub Release は作られていません。',
+              '- **タグは打ち直さないでください**（利用者が `?ref=` で参照するため）。',
+              '  修正を `develop` → `main` に入れて、次のパッチバージョンをリリースしてください。',
+              '- ローカルでは `make check` で同じ検証を再現できます。',
+              '',
+              `復旧手順: [docs/release_workflow.md](${context.serverUrl}/${owner}/${repo}/blob/main/docs/release_workflow.md)`,
+            ].join('\n');
+
+            // タグの元になった PR があればコメントする
+            try {
+              const { data: pulls } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: context.sha,
+              });
+              const pull = pulls.find((p) => p.merge_commit_sha === context.sha) ?? pulls[0];
+              if (pull) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pull.number, body: `❌ ${body}`,
+                });
+              }
+            } catch (error) {
+              core.warning(`PR へのコメントに失敗しました: ${error.message}`);
+            }
+
+            // 見落とさないよう Issue も作る（maintenance.yml と同じ maintenance ラベル）
+            const title = `❌ リリース ${tag} が完了しませんでした`;
+            try {
+              await github.rest.issues.create({
+                owner, repo, title, body, labels: ['maintenance'],
+              });
+            } catch (error) {
+              core.warning(`ラベル付きの Issue 作成に失敗しました: ${error.message}`);
+              await github.rest.issues.create({ owner, repo, title, body });
+            }
+
+            await core.summary
+              .addHeading(`リリース ${tag} の失敗を通知しました`, 3)
+              .addRaw(`- 失敗した工程: ${failed}`)
+              .write();

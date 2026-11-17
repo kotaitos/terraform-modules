@@ -1,0 +1,401 @@
+name: Release PR
+
+# 月 1 回のリリースを、リリースブランチの作成からマージまで自動で行う。
+#
+#   毎月 1 日: develop の先端から `release/vX.Y.Z` を切り、main への PR を作る
+#   1 日〜4 日: 内容とリリースノートを確認する。develop への変更はこの PR に影響しない
+#   毎月 4 日: その PR をマージする → release-tag.yml がタグを打ち、release.yml が Release を作る
+#
+# リリースブランチに切り出すのは、**レビュー中に内容が変わらないようにするため**。
+# head を develop にすると、確認している間に develop へマージされた変更が PR に入ってしまう。
+#
+# 差分が無ければどちらの日も何もしない。バージョンはコミットメッセージから算出する
+# （scripts/next-version.py）。リリースノートは GitHub の自動生成
+# （.github/release.yml のカテゴリ設定）をそのまま使う。
+on:
+  schedule:
+    # 毎月 1 日 09:00 JST（00:00 UTC）: リリースブランチと PR を作る
+    - cron: '0 0 1 * *'
+    # 毎月 4 日 09:00 JST（00:00 UTC）: リリース PR をマージしてリリースする
+    - cron: '0 0 4 * *'
+  workflow_dispatch:
+    inputs:
+      level:
+        description: バージョンの上げ方（auto はコミットメッセージから判定）
+        type: choice
+        default: auto
+        options: [auto, major, minor, patch]
+      release:
+        description: リリース PR をマージしてリリースまで実行する（既定はリリース PR の作成だけ）
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# リリースの実行を途中で取り消さない。月に数回しか動かないので直列で十分。
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # リリースブランチと PR の作成（毎月 1 日 / 手動実行）
+  #
+  # 既にリリース PR が開いている場合は何もしない。内容を固定するのが目的なので作り直さない。
+  # ----------------------------------------------------------------------------
+  prepare:
+    name: リリースブランチと PR の作成
+    if: github.event.schedule != '0 0 4 * *'
+    runs-on: ubuntu-latest
+    permissions:
+      # ブランチの作成と releases/generate-notes（リリースノートの生成）に必要
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # schedule / workflow_dispatch では既定ブランチ (main) がチェックアウトされるため、
+          # リリース対象の develop を明示する。
+          ref: develop
+          # タグと全コミットからバージョンを算出するため、浅いクローンにはしない
+          fetch-depth: 0
+
+      - name: 既存のリリース PR を確認
+        id: existing
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: open } = await github.rest.pulls.list({
+              owner, repo, base: 'main', state: 'open', per_page: 100,
+            });
+            const release = open.find((pull) => pull.head.ref.startsWith('release/'));
+            core.setOutput('found', release ? 'true' : 'false');
+            if (release) {
+              core.setOutput('url', release.html_url);
+              core.setOutput('title', release.title);
+              core.info(`既にリリース PR があります: ${release.html_url}`);
+            }
+
+      - name: 次のバージョンを算出
+        id: version
+        if: steps.existing.outputs.found != 'true'
+        env:
+          LEVEL: ${{ inputs.level }}
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+
+          if git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "releasable=false" >> "$GITHUB_OUTPUT"
+            echo "note=develop の変更はすべて main に取り込まれています。リリースする差分がありません。" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          level_args=()
+          if [ -n "${LEVEL:-}" ] && [ "${LEVEL}" != "auto" ]; then
+            level_args=(--level "${LEVEL}")
+          fi
+
+          # 対象コミットが無いと終了コード 1 を返す
+          if result="$(python3 scripts/next-version.py --json "${level_args[@]}")"; then
+            echo "releasable=true" >> "$GITHUB_OUTPUT"
+            echo "result=${result}" >> "$GITHUB_OUTPUT"
+            # ログ用（--level の指定を含めて、PR 本文と同じ判定を出す）
+            python3 scripts/next-version.py "${level_args[@]}" || true
+          else
+            echo "releasable=false" >> "$GITHUB_OUTPUT"
+            echo "note=リリース対象のコミットがありません。" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: リリースブランチと PR の作成
+        id: pr
+        if: steps.version.outputs.releasable == 'true'
+        uses: actions/github-script@v9
+        env:
+          VERSION_JSON: ${{ steps.version.outputs.result }}
+        with:
+          script: |
+            const info = JSON.parse(process.env.VERSION_JSON);
+            const { owner, repo } = context.repo;
+            const version = info.next;
+            const branch = `release/${version}`;
+            const isMajor = info.level === 'major';
+
+            // develop の先端でリリースブランチを固定する。以降 develop に入る変更は
+            // このブランチに入らないので、レビュー中に PR の内容が変わらない。
+            const sha = context.sha;
+            try {
+              await github.rest.git.createRef({
+                owner, repo, ref: `refs/heads/${branch}`, sha,
+              });
+              core.info(`${branch} を ${sha} で作成しました。`);
+            } catch (error) {
+              if (error.status !== 422) throw error;
+              // 同名のブランチが既にある。同じコミットを指しているなら（再実行など）そのまま使う。
+              // 違うコミットを指している場合は、古い残骸のブランチでリリース PR を作ってしまう危険が
+              // あるので、勝手に上書きせず止める。
+              const { data: ref } = await github.rest.git.getRef({
+                owner, repo, ref: `heads/${branch}`,
+              });
+              if (ref.object.sha !== sha) {
+                core.setFailed(
+                  `${branch} が別のコミット (${ref.object.sha.slice(0, 7)}) を指しています。` +
+                  `古いリリースブランチが残っている可能性があります。内容を確認して削除してから、` +
+                  `このワークフローを再実行してください。`
+                );
+                return;
+              }
+              core.warning(`${branch} は既に同じコミットで存在します。そのまま使います。`);
+            }
+
+            const notes = await github.rest.repos.generateReleaseNotes({
+              owner, repo,
+              tag_name: version,
+              target_commitish: branch,
+              ...(info.previous ? { previous_tag_name: info.previous } : {}),
+            });
+            // PR 本文の上限（65536 文字）に余裕を持たせる。初回リリースはノートが非常に長くなる。
+            const LIMIT = 40000;
+            const notesBody = notes.data.body.length > LIMIT
+              ? `${notes.data.body.slice(0, LIMIT)}\n\n…（長いため省略しました。全文はリリース時のノートを参照してください）`
+              : notes.data.body;
+
+            const reasons = info.reasons.map((reason) => `> - ${reason}`);
+            if (info.omitted_reasons > 0) reasons.push(`> - ほか ${info.omitted_reasons} 件`);
+
+            const mergeNote = isMajor
+              ? [
+                  '> [!WARNING]',
+                  '> **破壊的変更（MAJOR）を含むため、自動マージされません。**',
+                  '> 下の「破壊的変更の移行手順」に移行手順を追記し、内容を確認したうえで',
+                  '> **マージコミットで**（Squash を使わずに）マージしてください。',
+                ]
+              : [
+                  '> [!NOTE]',
+                  '> この PR は **毎月 4 日 09:00 JST に自動でマージされます**（CI が緑で、コンフリクトが',
+                  '> 無い場合のみ）。それまでの間に内容とリリースノートを確認してください。',
+                  '> 見送りたいときは `release-hold` ラベルを付けてください。すぐリリースしたいときは、',
+                  '> この PR を **マージコミットで**（Squash を使わずに）マージしてください。',
+                ];
+
+            const body = [
+              ...mergeNote,
+              '',
+              `リリース対象は \`${branch}\`（\`develop\` の ${sha.slice(0, 7)} 時点）に固定されています。`,
+              'これ以降 `develop` に入った変更は次回のリリースに回ります。',
+              '',
+              '## 破壊的変更の移行手順',
+              '',
+              '<!-- release-notes:extra:start -->',
+              '<!-- ここに書いた内容はリリースノートの先頭に転記されます（不要なら空のままにしてください）。 -->',
+              '<!-- release-notes:extra:end -->',
+              '',
+              `## 🚀 ${version}`,
+              '',
+              '| 項目 | 内容 |',
+              '| :--- | :--- |',
+              `| 前回のリリース | ${info.previous || 'なし（初回リリース）'} |`,
+              `| バージョンの上げ方 | **${info.level.toUpperCase()}** |`,
+              `| 対象コミット | ${info.commits} 件 |`,
+              `| リリースブランチ | \`${branch}\` |`,
+              '',
+              '<details><summary>バージョンの判定根拠</summary>',
+              '',
+              ...reasons,
+              '',
+              '</details>',
+              '',
+              '### リリースノート（プレビュー）',
+              '',
+              notesBody,
+            ].join('\n');
+
+            const { data: pull } = await github.rest.pulls.create({
+              owner, repo, base: 'main', head: branch,
+              title: `Release ${version}`,
+              body,
+            });
+            core.setOutput('url', pull.html_url);
+
+            // ラベルやアサインに失敗しても PR 自体は残したいので、警告にとどめる
+            try {
+              // release: 探しやすくするため / ignore-for-release: リリースノートに載せないため
+              // breaking-change: 自動マージの対象外にするため（release ジョブが見る）
+              const labels = ['release', 'ignore-for-release'];
+              if (isMajor) labels.push('breaking-change');
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: pull.number, labels,
+              });
+              if (!context.actor.endsWith('[bot]')) {
+                await github.rest.issues.addAssignees({
+                  owner, repo, issue_number: pull.number, assignees: [context.actor],
+                });
+              }
+            } catch (error) {
+              core.warning(`ラベル / アサインの設定に失敗しました: ${error.message}`);
+            }
+
+            await core.summary
+              .addHeading(`リリース PR: ${version}`, 3)
+              .addRaw([
+                `- 作成: ${pull.html_url}`,
+                `- リリースブランチ: \`${branch}\`（${sha.slice(0, 7)}）`,
+                `- バージョンの上げ方: ${info.level.toUpperCase()}（対象コミット ${info.commits} 件）`,
+                isMajor ? '- 破壊的変更を含むため、自動マージはされません' : '- 毎月 4 日に自動でマージされます',
+              ].join('\n'))
+              .write();
+
+      - name: 作成しなかった場合のサマリー
+        if: steps.existing.outputs.found == 'true' || steps.version.outputs.releasable != 'true'
+        run: |
+          {
+            echo "### リリース PR"
+            echo
+            if [ "${{ steps.existing.outputs.found }}" = "true" ]; then
+              echo "既にリリース PR が開いています（作り直しません）: ${{ steps.existing.outputs.url }}"
+            else
+              echo "${{ steps.version.outputs.note }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # リリース PR のマージ（毎月 4 日 / 手動実行で release: true）
+  #
+  # リリースする差分が無ければリリース PR も無いので何もしない。
+  # CI が緑でない・コンフリクトがある・release-hold ラベルが付いている・破壊的変更を
+  # 含む場合は、理由を PR にコメントして見送る（ワークフローは失敗させない）。
+  # ----------------------------------------------------------------------------
+  release:
+    name: リリース PR のマージ
+    needs: prepare
+    if: ${{ always() && needs.prepare.result != 'failure' && (github.event.schedule == '0 0 4 * *' || inputs.release) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # main へのマージとリリースブランチの削除
+      pull-requests: write  # マージとコメント
+      actions: write        # release-tag.yml の起動
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            const { data: open } = await github.rest.pulls.list({
+              owner, repo, base: 'main', state: 'open', per_page: 100,
+            });
+            const found = open.find((pull) => pull.head.ref.startsWith('release/'));
+            if (!found) {
+              core.info('リリース PR がありません。何もしません。');
+              await core.summary
+                .addHeading('自動リリース: 対象なし', 3)
+                .addRaw('開いているリリース PR がありません（リリースする差分が無い状態です）。')
+                .write();
+              return;
+            }
+
+            const pull_number = found.number;
+            const branch = found.head.ref;
+            const version = branch.replace('release/', '');
+
+            // 見送りは「失敗」ではなく通知にとどめる（次の機会に再開できる状態を保つ）
+            const skip = async (reason) => {
+              core.warning(`自動リリースを見送りました: ${reason}`);
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pull_number,
+                body: `⏸ **自動リリースを見送りました。**\n\n${reason}\n\n解消後、この PR をマージすればリリースされます。`,
+              });
+              await core.summary
+                .addHeading(`自動リリース: 見送り（${version}）`, 3)
+                .addRaw(reason)
+                .write();
+            };
+
+            if (found.title !== `Release ${version}`) {
+              return skip(`リリース PR のタイトル（\`${found.title}\`）とリリースブランチ（\`${branch}\`）のバージョンが一致しません。内容を確認して手でマージしてください。`);
+            }
+
+            // mergeable_state は GitHub が非同期に計算するため、確定するまで待つ
+            let pull = found;
+            for (let attempt = 0; attempt < 6; attempt += 1) {
+              ({ data: pull } = await github.rest.pulls.get({ owner, repo, pull_number }));
+              if (pull.mergeable_state && pull.mergeable_state !== 'unknown') break;
+              await new Promise((resolve) => setTimeout(resolve, 10000));
+            }
+
+            const labels = pull.labels.map((label) => label.name);
+            if (labels.includes('release-hold')) {
+              return skip('`release-hold` ラベルが付いています。外すと次回から対象になります。');
+            }
+            // 破壊的変更（MAJOR）は利用者の対応が必要なので、必ず人がマージする
+            if (labels.includes('breaking-change')) {
+              return skip('**破壊的変更（MAJOR）を含むため自動マージしません。** 移行手順を追記し、内容を確認したうえで手でマージしてください。');
+            }
+
+            const REASONS = {
+              dirty: 'リリースブランチと main にコンフリクトがあります。解消してください。',
+              behind: 'main に取り込まれていない変更があります（`main` → `develop` の追従 PR をマージしてから、リリースブランチを更新してください）。',
+              blocked: 'ブランチ保護（レビュー必須など）によりマージできません。内容を確認して手でマージしてください。',
+              unstable: 'CI が成功していません（実行中か失敗しています）。',
+              draft: 'この PR はドラフトです。',
+              has_hooks: 'リポジトリのフックによりマージできませんでした。',
+              unknown: 'マージ可能かどうかを判定できませんでした。',
+            };
+            if (pull.mergeable_state !== 'clean') {
+              return skip(REASONS[pull.mergeable_state] ?? `マージできない状態です (${pull.mergeable_state})。`);
+            }
+
+            try {
+              await github.rest.pulls.merge({
+                owner, repo, pull_number,
+                sha: pull.head.sha,
+                merge_method: 'merge',
+                commit_title: `Release ${version} (#${pull_number})`,
+                commit_message: '',
+              });
+            } catch (error) {
+              const detail = error.status === 409
+                ? 'マージの直前にリリースブランチが更新されました。次の実行、または手動マージで改めてリリースしてください。'
+                : `マージに失敗しました: ${error.message}`;
+              return skip(detail);
+            }
+
+            // GITHUB_TOKEN によるマージでは push イベントのワークフローが起動しないため、
+            // release-tag.yml を明示的に起動する（workflow_dispatch はこの制限の例外）。
+            // マージ直後は既定ブランチの反映待ちで失敗しうるので数回試す。
+            let dispatched = false;
+            for (let attempt = 0; attempt < 3 && !dispatched; attempt += 1) {
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner, repo, workflow_id: 'release-tag.yml', ref: 'main',
+                });
+                dispatched = true;
+              } catch (error) {
+                core.warning(`release-tag.yml の起動に失敗しました (${attempt + 1}/3): ${error.message}`);
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+              }
+            }
+
+            // マージ済みのリリースブランチは残さない（次回は新しく切り直す）
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` });
+            } catch (error) {
+              core.warning(`${branch} の削除に失敗しました: ${error.message}`);
+            }
+
+            if (!dispatched) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: pull_number,
+                body: '⚠️ マージはできましたが、**Release Tag ワークフローの起動に失敗しました**。\nActions から `Release Tag` を `main` に対して手動で実行してください。',
+              });
+              core.setFailed('release-tag.yml を起動できませんでした。Actions から手動で実行してください（ref: main）。');
+              return;
+            }
+
+            await core.summary
+              .addHeading(`自動リリース: ${version}`, 3)
+              .addRaw([
+                `- リリース PR #${pull_number}（\`${branch}\`）をマージしました`,
+                '- タグ付けと GitHub Release の作成は Release Tag / Release ワークフローが続けます',
+              ].join('\n'))
+              .write();

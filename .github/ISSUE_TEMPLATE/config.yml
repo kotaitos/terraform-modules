@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: コントリビューションガイドを読む
+    url: https://github.com/brainpad-whiterabbit/terraform-modules/blob/main/CONTRIBUTING.md
+    about: セットアップ、開発の進め方、守ってほしいことの入口。
+  - name: 開発ワークフローを確認する
+    url: https://github.com/brainpad-whiterabbit/terraform-modules/blob/main/docs/development_workflow.md
+    about: ブランチ戦略・PR の作り方・リリース手順はこちら。
+  - name: モジュールの使い方を確認する
+    url: https://github.com/brainpad-whiterabbit/terraform-modules/blob/main/docs/module_usage.md
+    about: 2 つの利用パターン、認証、バージョンアップ手順はこちら。

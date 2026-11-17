@@ -1,0 +1,133 @@
+name: Maintenance
+
+# 週次のメンテナンスチェック。
+#   1. 最新のプロバイダー・最新の Terraform で全モジュールが通るか（上流の破壊的変更の早期検知）
+#   2. バージョン制約の上限を超える安定版が出ていないか（取り残されの検知）
+# どちらかが失敗したら Issue を作り、直ったら自動で閉じる。
+on:
+  schedule:
+    # 毎週月曜 07:00 JST (22:00 UTC 日曜)
+    - cron: '0 22 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-providers:
+    name: 最新プロバイダーでの検証
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: latest
+          terraform_wrapper: false
+
+      # ここではプロバイダーのキャッシュを使わない。
+      # 制約 (`>= 6.0.0, < 8.0.0`) の範囲内で最新のプロバイダーを取得して検証するため。
+      - name: validate & test
+        run: make validate test
+
+      # terraform は上の setup-terraform で latest を入れているので、ここでは tflint だけ。
+      - uses: terraform-linters/setup-tflint@v6.3.0
+        with:
+          tflint_version_file: .tool-versions
+          cache: true
+          plugin_dir: .tools/tflint-plugins
+
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make lint
+
+  provider-versions:
+    name: バージョン制約の棚卸し
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: プロバイダーの最新版と制約の比較
+        id: check
+        run: |
+          python3 scripts/check-provider-versions.py --markdown > provider-versions.md || echo "outdated=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### プロバイダーのバージョン制約"
+            echo
+            cat provider-versions.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上限を超える安定版があれば失敗させる
+        if: steps.check.outputs.outdated == 'true'
+        run: |
+          cat provider-versions.md
+          echo "::error::バージョン制約の上限を超えるプロバイダーの安定版が出ています。"
+          exit 1
+
+  notify:
+    name: 結果の通知
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule'
+    needs: [latest-providers, provider-versions]
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const TITLE = '🔧 週次メンテナンスチェックの失敗';
+            const LABEL = 'maintenance';
+            const results = {
+              '最新プロバイダーでの検証': '${{ needs.latest-providers.result }}',
+              'バージョン制約の棚卸し': '${{ needs.provider-versions.result }}',
+            };
+            const failedChecks = Object.entries(results).filter(([, result]) => result !== 'success');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const { owner, repo } = context.repo;
+
+            // 同じ内容の Issue を毎週作らないよう、既存のものを探して使い回す
+            const existing = (await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: LABEL, per_page: 100,
+            })).find((issue) => issue.title === TITLE);
+
+            if (failedChecks.length === 0) {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `✅ 週次メンテナンスチェックが回復しました（[実行ログ](${runUrl})）。この Issue を閉じます。`,
+                });
+                await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+              }
+              return;
+            }
+
+            const body = [
+              '週次メンテナンスチェックが失敗しました。',
+              '',
+              '| チェック | 結果 |',
+              '| :--- | :---: |',
+              ...Object.entries(results).map(([name, result]) => `| ${name} | ${result === 'success' ? '✅' : '❌'} |`),
+              '',
+              `詳細: [実行ログ](${runUrl})`,
+              '',
+              '- **最新プロバイダーでの検証**が失敗した場合: バージョン制約の範囲内で公開された',
+              '  新しいプロバイダーがモジュールを壊しています。修正するか、`versions.tf` の上限を下げてください。',
+              '- **バージョン制約の棚卸し**が失敗した場合: 制約の上限を超えるメジャーバージョンが出ています。',
+              '  破壊的変更を確認したうえで、`versions.tf` と各 README の Requirements を更新してください。',
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+            } else {
+              // ラベルが無い場合は作ってから Issue を立てる
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: LABEL });
+              } catch {
+                await github.rest.issues.createLabel({
+                  owner, repo, name: LABEL, color: 'd4c5f9', description: '定期メンテナンス',
+                });
+              }
+              await github.rest.issues.create({ owner, repo, title: TITLE, body, labels: [LABEL] });
+            }

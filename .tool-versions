@@ -1,0 +1,12 @@
+# 開発・CI で使うツールのバージョン。mise (https://mise.jdx.dev/) が読む。
+# ローカルは `make tools`、CI は jdx/mise-action がこのファイルを唯一の情報源にするので、
+# バージョンを上げるときはここだけを変更する。
+#
+# terraform はモジュールの required_version (>= 1.10) と揃えた「最小サポートバージョン」。
+# CI ではこのバージョンと最新版の両方で検証する。
+terraform 1.10.0
+tflint 0.64.0
+trivy 0.74.0
+
+# git フックの実行環境（.pre-commit-config.yaml）
+pipx:pre-commit 4.4.0

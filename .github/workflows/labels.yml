@@ -1,0 +1,37 @@
+name: Labels
+
+# ラベルを .github/labels.yml で管理する（labels as code）。同期は
+# crazy-max/ghaction-github-labeler に任せている。
+#
+# リリースノートのカテゴリ分け (.github/release.yml)、Dependabot、Triage ワークフローは
+# いずれもラベル名を前提にしている。ラベルが存在しないと「気付かないうちに分類されない」
+# 状態になるため、定義をリポジトリに置いて自動で同期する。
+#
+# 既存ラベルの削除はしない（PR や Issue から外れてしまうため）。定義に無いラベルは
+# skip-delete でそのまま残す。
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      # ラベルの定義（このワークフロー自身ではない）
+      - '.github/labels.yml'
+      - '.github/workflows/labels.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: ラベルの同期
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: crazy-max/ghaction-github-labeler@v6.0.0
+        with:
+          yaml-file: .github/labels.yml
+          skip-delete: true

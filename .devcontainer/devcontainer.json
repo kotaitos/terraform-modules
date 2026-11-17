@@ -1,0 +1,15 @@
+{
+    "name": "Cloud SDK & Terraform",
+    "dockerComposeFile": ["./docker-compose.yml"],
+    "service": "tfdev",
+    "runServices": ["tfdev"],
+    "workspaceFolder": "/workspace",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "hashicorp.terraform",
+                "bierner.markdown-mermaid"
+            ]
+        }
+    }
+}

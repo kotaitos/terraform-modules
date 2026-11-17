@@ -1,0 +1,35 @@
+# GitHub の「リリースノートの自動生成」の設定。
+# .github/workflows/release.yml と release-pr.yml がこの設定でノートを生成する。
+#
+# カテゴリ分けは PR のラベルで決まる。ラベルは .github/workflows/triage.yml が
+# PR のタイトルと変更ファイルから自動で付ける（定義は .github/labels.yml）。
+# PR は上から順に最初に一致したカテゴリに入るため、重要なものを先に並べている。
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: 💥 破壊的変更（利用者の対応が必要）
+      labels:
+        - breaking-change
+    - title: ✨ 新しいモジュール
+      labels:
+        - new-module
+    - title: 🚀 機能追加・改善
+      labels:
+        - enhancement
+    - title: 🐛 バグ修正
+      labels:
+        - bug
+    - title: 📝 ドキュメント
+      labels:
+        - documentation
+    - title: 🔧 開発基盤 / CI
+      labels:
+        - ci
+        - dependencies
+        - template
+        - devcontainer
+    - title: その他の変更
+      labels:
+        - "*"

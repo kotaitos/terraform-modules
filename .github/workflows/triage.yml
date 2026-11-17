@@ -1,0 +1,218 @@
+name: Triage
+
+# PR と Issue の「作ったあとの手作業」を無くす。
+#   1. PR タイトルの形式チェック（squash マージでそのままコミットの subject になる）
+#   2. ラベルの自動付与（リリースノートのカテゴリ分けがラベルで決まるため）
+#   3. 未アサインなら作成者をアサインする
+#
+# ラベルは作成時（opened / reopened）だけ付ける。あとから人が外したラベルを
+# 付け直さないようにするため、更新時は形式チェックだけを行う。
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # PR タイトルの形式（コミットメッセージ規約と同じチェック）
+  # ----------------------------------------------------------------------------
+  # develop へは squash マージなので、PR タイトルがそのままコミットの subject になり、
+  # リリースのバージョン判定に使われる。ローカルの commitlint（.commitlintrc.json）と
+  # 同じ規約を、ここでは PR タイトルに対して適用する。
+  # 自動生成されるリリース PR（タイトルが `Release vX.Y.Z`）は release ラベルで除外する。
+  pr-title:
+    name: PR タイトルの形式
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            refactor
+            test
+            docs
+            style
+            chore
+            perf
+          # scope は必須（例: modules/google/artifact-registry, docs, ci, agents）
+          requireScope: true
+          scopes: |
+            [a-z0-9._/-]+
+          # subject の末尾にピリオドは付けない
+          subjectPattern: ^(?!.*\.$).+$
+          subjectPatternError: |
+            subject（`{value}`）の末尾にピリオドは付けません。詳細: docs/commit_message.md
+          ignoreLabels: |
+            release
+
+  # ----------------------------------------------------------------------------
+  # PR のラベルとアサイン
+  # ----------------------------------------------------------------------------
+  # Dependabot が作った PR では GITHUB_TOKEN が読み取り専用になるためスキップする
+  # （ラベルは .github/dependabot.yml の設定で付くので問題ない）。
+  pr-triage:
+    name: PR のラベルとアサイン
+    if: |
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' || github.event.action == 'reopened') &&
+      !endsWith(github.actor, '[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+
+            // タイトルの type からラベルを決める（docs/commit_message.md）
+            const TYPE_LABELS = {
+              feat: 'enhancement',
+              perf: 'enhancement',
+              fix: 'bug',
+              docs: 'documentation',
+              chore: null,
+              refactor: null,
+              test: null,
+              style: null,
+            };
+
+            // 開発基盤の変更は type ではなく scope で決める（リリースノートの分類を合わせるため）。
+            // 例: fix(ci) はモジュールのバグ修正ではないので bug ではなく ci にする。
+            const INFRA_SCOPES = /^(ci|scripts|agents|devcontainer|templates?)$/;
+
+            const labels = new Set();
+            const match = pr.title.match(/^([a-z]+)(?:\(([^)]*)\))?(!)?:/);
+            if (match) {
+              const scope = match[2] ?? '';
+              if (INFRA_SCOPES.test(scope)) {
+                labels.add(scope === 'devcontainer' ? 'devcontainer' : (scope.startsWith('template') ? 'template' : 'ci'));
+              } else {
+                const label = TYPE_LABELS[match[1]];
+                if (label) labels.add(label);
+              }
+              if (match[3]) labels.add('breaking-change');
+            }
+            if (/BREAKING[ -]CHANGE:/.test(pr.body ?? '')) labels.add('breaking-change');
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const paths = files.map((file) => file.filename);
+
+            // 新しいモジュールの追加は main.tf の新規追加で判定する
+            if (files.some((file) =>
+              file.status === 'added' && /^modules\/[^/]+\/[^/]+\/main\.tf$/.test(file.filename)
+            )) {
+              labels.add('new-module');
+            }
+
+            // 「全ファイルがその領域」のときだけ領域ラベルを付ける。
+            // モジュールの変更に付随する README 更新まで documentation にしないため。
+            const every = (predicate) => paths.length > 0 && paths.every(predicate);
+            if (every((path) => path.startsWith('docs/') || path.endsWith('.md'))) {
+              labels.add('documentation');
+            }
+            if (every((path) =>
+              path.startsWith('.github/') || path.startsWith('scripts/') ||
+              path === 'Makefile' || path === '.tool-versions' ||
+              path.startsWith('.tflint') || path.startsWith('trivy') ||
+              path.startsWith('.pre-commit-config') || path.startsWith('.commitlintrc')
+            )) {
+              labels.add('ci');
+            }
+            if (every((path) => path.startsWith('templates/'))) labels.add('template');
+            if (every((path) => path.startsWith('.devcontainer/'))) labels.add('devcontainer');
+
+            const existing = new Set(pr.labels.map((label) => label.name));
+            const toAdd = [...labels].filter((label) => !existing.has(label));
+            const author = pr.user?.login ?? '';
+            // Triage の失敗で PR を止めたくないので、エラーは警告にとどめる
+            try {
+              if (toAdd.length > 0) {
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: pr.number, labels: toAdd,
+                });
+              }
+              // 未アサインなら作成者をアサインする（bot の PR は除く）
+              if (pr.assignees.length === 0 && !author.endsWith('[bot]')) {
+                await github.rest.issues.addAssignees({
+                  owner, repo, issue_number: pr.number, assignees: [author],
+                });
+              }
+            } catch (error) {
+              core.warning(`ラベル / アサインの設定に失敗しました: ${error.message}`);
+            }
+
+            await core.summary
+              .addHeading('PR の Triage', 3)
+              .addRaw([
+                `- 付与したラベル: ${toAdd.length ? toAdd.map((l) => `\`${l}\``).join(', ') : 'なし'}`,
+                `- 既に付いていたラベル: ${existing.size ? [...existing].map((l) => `\`${l}\``).join(', ') : 'なし'}`,
+                `- アサイン: ${pr.assignees.length === 0 ? author || 'なし' : '既にあり'}`,
+              ].join('\n'))
+              .write();
+
+  # ----------------------------------------------------------------------------
+  # Issue のラベルとアサイン
+  # ----------------------------------------------------------------------------
+  issue-triage:
+    name: Issue のラベルとアサイン
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const { owner, repo } = context.repo;
+
+            // Issue テンプレートを使えばラベルは既に付いている。
+            // 空の Issue のときだけ、タイトルから推測して、分からなければ needs-triage を付ける。
+            let label = null;
+            const author = issue.user?.login ?? '';
+            // Triage の失敗で Issue の作成を妨げたくないので、エラーは警告にとどめる
+            try {
+              if (issue.labels.length === 0) {
+                const title = issue.title.toLowerCase();
+                if (/^(fix|bug)\b|バグ|エラー|動かない/.test(title)) label = 'bug';
+                else if (/^feat\b|新機能|追加したい/.test(title)) label = 'enhancement';
+                else if (/^docs\b|ドキュメント/.test(title)) label = 'documentation';
+                else label = 'needs-triage';
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: issue.number, labels: [label],
+                });
+              }
+
+              // 未アサインなら作成者をアサインする（担当者を明示するのがこのリポジトリの運用）
+              if (issue.assignees.length === 0 && !author.endsWith('[bot]')) {
+                await github.rest.issues.addAssignees({
+                  owner, repo, issue_number: issue.number, assignees: [author],
+                });
+              }
+            } catch (error) {
+              core.warning(`ラベル / アサインの設定に失敗しました: ${error.message}`);
+            }
+
+            await core.summary
+              .addHeading('Issue の Triage', 3)
+              .addRaw([
+                `- 付与したラベル: ${label ? `\`${label}\`` : 'なし（テンプレートで付与済み）'}`,
+                `- アサイン: ${issue.assignees.length === 0 ? author || 'なし' : '既にあり'}`,
+              ].join('\n'))
+              .write();

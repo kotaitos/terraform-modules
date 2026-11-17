@@ -1,0 +1,26 @@
+# ------------------------------------------------------------------------------
+# Trivy の設定（make security と CI の両方がこのファイルを読む）
+#
+# このリポジトリが「配布するもの」= Terraform モジュールと、その雛形だけを対象にする。
+# .devcontainer/ は開発者のローカル環境用なのでスキャン対象外。
+# 除外したい検出結果は .trivyignore.yaml に理由付きで書く。
+# ------------------------------------------------------------------------------
+# 除外設定（理由付き）
+ignorefile: .trivyignore.yaml
+
+severity:
+  - HIGH
+  - CRITICAL
+
+exit-code: 1
+
+scan:
+  skip-dirs:
+    - "**/.terraform"
+    - ".tools"
+    - ".devcontainer"
+    - ".git"
+    - ".github"
+
+misconfiguration:
+  include-non-failures: false

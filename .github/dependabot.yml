@@ -1,0 +1,60 @@
+# 依存の更新を自動で PR にする。
+# コミットメッセージの prefix は docs/commit_message.md の規約に合わせている
+# （.commitlintrc.json のチェックを通る形式）。
+#
+# target-branch は必ず develop にする。既定（main）のままだと依存更新の PR が main に入り、
+# release-tag.yml がそれをリリースとしてタグ付けしてしまう（かつ develop に反映されない）。
+version: 2
+updates:
+  # GitHub Actions のバージョン更新
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    labels:
+      - ci
+      - dependencies
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # git フックの rev ピン (.pre-commit-config.yaml)
+  - package-ecosystem: pre-commit
+    directory: "/"
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    labels:
+      - ci
+      - dependencies
+    commit-message:
+      prefix: "chore(ci)"
+
+  # 各モジュールの required_providers のバージョン制約
+  # （上限を超える新しいメジャーバージョンの検知は .github/workflows/maintenance.yml でも行っている）
+  - package-ecosystem: terraform
+    directories:
+      # modules/<provider>/<module> の階層。新しいプロバイダーを足しても設定変更は不要。
+      - "/modules/*/*"
+      - "/templates/module/*"
+    target-branch: develop
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(modules)"
+    open-pull-requests-limit: 5

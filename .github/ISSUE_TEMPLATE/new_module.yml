@@ -1,0 +1,50 @@
+name: 新しいモジュールの追加
+description: 新しいモジュールを提案する
+labels: [new-module]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        新しいモジュールは「実運用に必要な一式をカプセル化できる」場合にだけ作ります。
+        単一リソースの薄いラッパーは作りません
+        （[モジュールコントリビューションガイドライン](https://github.com/brainpad-whiterabbit/terraform-modules/blob/main/docs/module_contribution_guidelines.md)）。
+
+  - type: input
+    id: name
+    attributes:
+      label: モジュール名
+      description: "`<provider>/<module-name>` 形式"
+      placeholder: google/pubsub-topic
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: なぜこのモジュールが必要か
+      description: 素の resource で書くと何が面倒／危険なのか。公式モジュールで代替できない理由。
+    validations:
+      required: true
+
+  - type: textarea
+    id: resources
+    attributes:
+      label: 作成するリソース
+      description: IAM の付与順序や依存関係も含めて書いてください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: interface
+    attributes:
+      label: 想定するインターフェース
+      description: 主要な変数と出力。
+      render: hcl
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 着手前の確認
+      options:
+        - label: 公式モジュール（terraform-google-modules / terraform-aws-modules など）で代替できないことを確認した
+        - label: 既存モジュールの拡張ではなく、新規モジュールが適切だと判断した
