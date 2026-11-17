@@ -113,7 +113,7 @@ jobs:
 
       # バージョンは .tool-versions をそのまま読ませる。
       # プラグイン (.tflint.hcl の google ルールセット) のキャッシュもこの action が持つ。
-      - uses: terraform-linters/setup-tflint@v6.3.0
+      - uses: terraform-linters/setup-tflint@v6.3.2
         with:
           tflint_version_file: .tool-versions
           cache: true
