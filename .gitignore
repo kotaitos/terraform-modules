@@ -1,0 +1,58 @@
+# ------------------------------------------------------------------------------
+# Terraform
+# 参考: https://github.com/github/gitignore/blob/main/Terraform.gitignore
+# ------------------------------------------------------------------------------
+
+# ローカルの .terraform ディレクトリ（プロバイダーバイナリやモジュールキャッシュ）
+**/.terraform/*
+
+# Makefile がモジュール間で共有するプロバイダーキャッシュ
+.terraform-plugin-cache/
+
+# tflint のプラグイン（TFLINT_PLUGIN_DIR）
+.tools/
+
+# state ファイル
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# .terraform.lock.hcl
+# このリポジトリは「モジュールだけ」を提供する。ロックファイルはルートモジュール
+# （利用者側のコード）が持つものであり、モジュール側に置いても利用者には使われない。
+# ここにあるロックファイルは terraform validate / terraform test を各モジュール
+# ディレクトリで実行したときに生成される副産物なので、コミットしない。
+.terraform.lock.hcl
+
+# クラッシュログ
+crash.log
+crash.*.log
+
+# 機密情報を含む可能性があるため .tfvars は除外する
+*.tfvars
+*.tfvars.json
+
+# ローカル上書き用ファイル
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI 設定
+.terraformrc
+terraform.rc
+
+# ------------------------------------------------------------------------------
+# scripts/ (Python)
+# ------------------------------------------------------------------------------
+__pycache__/
+
+# ------------------------------------------------------------------------------
+# エディタ / AI エージェント / OS
+# ------------------------------------------------------------------------------
+.vscode/mcp.json
+
+# 権限の許可などをエージェントが書き込むローカル設定。共有しない
+.claude/settings.local.json
+
+.DS_Store

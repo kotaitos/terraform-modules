@@ -1,0 +1,19 @@
+# ------------------------------------------------------------------------------
+# Trivy (misconfiguration スキャン) の除外設定
+#
+#   make security   # 全モジュールをスキャンする
+#
+# 除外は最後の手段です。まずはコードを直せないかを検討してください。
+# どうしても除外する場合は「なぜ安全なのか」を statement に必ず書きます。
+# expired_at を入れておくと、その日以降は再び検出されるので棚卸しできます。
+# ------------------------------------------------------------------------------
+misconfigurations:
+  - id: GCP-0015
+    paths:
+      - "modules/google/postgres-psc/main.tf"
+    statement: >-
+      誤検出。このモジュールは settings.ssl_mode の既定値を ENCRYPTED_ONLY にしており、
+      省略時も null を渡した場合も TLS を強制する（main.tftest.hcl の
+      ssl_mode_null_falls_back_to_default で検証済み）。Trivy は object 型の
+      optional(string, "ENCRYPTED_ONLY") というネストした既定値を解決できず、
+      ssl_mode を未設定として扱うため検出される。

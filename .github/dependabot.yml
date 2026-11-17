@@ -1,0 +1,44 @@
+# 依存の更新を自動で PR にする。
+version: 2
+updates:
+  # GitHub Actions のバージョン更新
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # git フックの rev ピン (.pre-commit-config.yaml)
+  - package-ecosystem: pre-commit
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: "chore(ci)"
+
+  # 各モジュールの required_providers のバージョン制約
+  # 制約の上限を超える新しいメジャーバージョンは `make providers` で確認する。
+  - package-ecosystem: terraform
+    directories:
+      # modules/<provider>/<module> の階層。新しいプロバイダーを足しても設定変更は不要。
+      - "/modules/*/*"
+      - "/templates/module/*"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: "chore(modules)"
+    open-pull-requests-limit: 5

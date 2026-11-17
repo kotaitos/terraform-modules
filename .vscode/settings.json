@@ -1,0 +1,28 @@
+{
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true,
+    "terminal.integrated.defaultProfile.linux": "zsh",
+    "terminal.integrated.profiles.linux": {
+        "zsh": {
+            "path": "/bin/zsh"
+        }
+    },
+   "[terraform]": {
+       "editor.defaultFormatter": "hashicorp.terraform",
+       "editor.formatOnSave": true,
+       "editor.formatOnSaveMode": "file",
+       "editor.tabSize": 2
+   },
+   "[terraform-test]": {
+       "editor.defaultFormatter": "hashicorp.terraform",
+       "editor.formatOnSave": true,
+       "editor.formatOnSaveMode": "file",
+       "editor.tabSize": 2
+   },
+   "[terraform-vars]": {
+       "editor.defaultFormatter": "hashicorp.terraform",
+       "editor.formatOnSave": true,
+       "editor.formatOnSaveMode": "file",
+       "editor.tabSize": 2
+   }
+}
