@@ -14,7 +14,7 @@ default_install_hook_types: [pre-commit]
 repos:
   # terraform fmt。差分があれば自動で整形する（make fmt-fix と同じ）。
   - repo: https://github.com/antonbabenko/pre-commit-terraform
-    rev: v1.108.1
+    rev: v1.109.5
     hooks:
       - id: terraform_fmt
 
